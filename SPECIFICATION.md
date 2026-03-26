@@ -83,6 +83,18 @@ Vesta is an open-source, self-hosted Platform-as-a-Service (PaaS) that lets deve
 - Zero-downtime rolling deployments
 - Rollback to any previous deployment
 
+### 4.1.1 Container Scaling
+
+Unlike Coolify, Vesta treats replica count as a first-class concept:
+
+- Each application environment has a configurable **replica count** (number of container instances / pods)
+- Default is 1; users can scale up from the dashboard, API, or (future) CLI
+- The agent manages replicas via Docker service mode (single server) or distributes across servers in multi-server setups
+- Caddy automatically load-balances across all healthy replicas
+- Scale-to-zero is supported for non-production environments to save resources
+- On Kubernetes (post-MVP), replica count maps directly to `spec.replicas` in the Deployment manifest
+- Health-check-aware scaling: new replicas must pass health checks before old ones are drained
+
 ### 4.2 Database & Service Management
 
 - One-click deploy: PostgreSQL, MySQL/MariaDB, MongoDB, Redis, ClickHouse, MinIO
@@ -111,6 +123,20 @@ Vesta is an open-source, self-hosted Platform-as-a-Service (PaaS) that lets deve
 - Audit log for every secret read/write
 - Scoped secrets: global, project-level, environment-level
 
+#### Fine-Grained Secret Permissions
+
+Secret access is controlled independently from the general RBAC roles. This allows teams to restrict who can view, edit, or use specific secrets even within the same project:
+
+- **Secret ACLs**: Each secret (or secret scope) has an access-control list specifying which team members or roles can `read`, `write`, `use` (inject into deployments), or `manage` (change ACLs) it
+- **Permission levels**:
+  - `read` -- view the secret value in the dashboard/API
+  - `write` -- create, update, or delete the secret
+  - `use` -- secret is injected into deployments the user triggers (without necessarily being able to read the plaintext)
+  - `manage` -- modify the ACL itself
+- **Inheritance**: Permissions cascade from global -> project -> environment scope, but can be overridden (restricted or expanded) at any level
+- **Defaults**: Owners and Admins get full access; Developers get `use` on project/environment secrets; Viewers get no secret access
+- **API token scoping**: API tokens can be scoped to specific secrets or secret prefixes, enabling CI/CD pipelines to access only the secrets they need
+
 ### 4.5 Domain & SSL
 
 - Custom domain management per application
@@ -126,12 +152,104 @@ Vesta is an open-source, self-hosted Platform-as-a-Service (PaaS) that lets deve
 
 ### 4.7 Authentication & Teams
 
+#### Authentication
 - Built-in email/password authentication
 - OAuth/SSO: GitHub, Google, generic OIDC
-- Role-based access control: Owner, Admin, Developer, Viewer
-- API tokens for CI/CD integration
+- Optional 2FA/TOTP for dashboard login
+- API tokens for CI/CD integration, scopeable to specific resources and operations
 
-### 4.8 Monitoring & Notifications
+#### Teams
+- Every resource (project, server, database, secret) belongs to a team
+- Users can belong to multiple teams and switch between them in the dashboard
+- Team creation with invite-by-email workflow
+- Role-based access control per team: Owner, Admin, Developer, Viewer
+- Fine-grained resource-level permissions (secrets, servers, projects) layered on top of RBAC roles
+- Team-level audit log showing all member actions
+- Transfer project ownership between teams
+
+### 4.8 Backups
+
+Vesta provides a unified backup system covering both managed databases and application volumes:
+
+#### Database Backups
+- Automatic scheduled backups for all managed databases (PostgreSQL, MySQL, MongoDB, Redis, ClickHouse)
+- Engine-native dump tools (`pg_dump`, `mysqldump`, `mongodump`, etc.) executed by the agent
+- Configurable schedule per database (cron expression) with sensible defaults (daily at 02:00 UTC)
+- Retention policy: keep N most recent backups, or time-based (e.g., 7 daily + 4 weekly + 3 monthly)
+
+#### Application Volume Backups
+- Opt-in backup of persistent Docker volumes attached to application containers
+- Snapshot-based: agent pauses writes (where supported), tars the volume, and uploads
+- Same scheduling and retention policies as database backups
+
+#### Storage Destinations
+- **S3-compatible** storage as the primary target (AWS S3, MinIO, Backblaze B2, Cloudflare R2, DigitalOcean Spaces)
+- Multiple storage destinations can be configured per team
+- Backups encrypted before upload (AES-256-GCM, key managed via the secrets system)
+
+#### Restore
+- One-click restore from any backup point in the dashboard
+- Restore to the same database/volume or to a new instance (clone)
+- Point-in-time restore for PostgreSQL (via WAL archiving, optional advanced mode)
+
+#### Backup Monitoring
+- Dashboard showing backup status, last success/failure, size, and duration per resource
+- Notifications on backup failure via configured channels
+- Backup verification: periodic test-restore to validate backup integrity (optional)
+
+#### Schema
+
+```
+Backup
+  id, team_id, resource_type (database|volume), resource_id,
+  storage_destination_id, status (scheduled|running|completed|failed),
+  size_bytes, encryption_key_ref,
+  started_at, finished_at, expires_at, created_at
+
+BackupSchedule
+  id, resource_type, resource_id, cron_expression,
+  retention_count, retention_days, enabled,
+  storage_destination_id, created_at, updated_at
+
+StorageDestination
+  id, team_id, name, type (s3), config (JSON: bucket, region, endpoint, credentials_secret_id),
+  created_at, updated_at
+```
+
+#### API Endpoints
+
+```
+Storage Destinations
+  GET    /api/teams/:teamId/storage-destinations
+  POST   /api/teams/:teamId/storage-destinations
+  PATCH  /api/storage-destinations/:id
+  DELETE /api/storage-destinations/:id
+  POST   /api/storage-destinations/:id/test          (verify connectivity)
+
+Backups
+  GET    /api/backups?resourceType=...&resourceId=...
+  POST   /api/backups                                 (trigger manual backup)
+  GET    /api/backups/:id
+  DELETE /api/backups/:id
+  POST   /api/backups/:id/restore                     { targetId?: string }
+
+Backup Schedules
+  GET    /api/backup-schedules?resourceType=...&resourceId=...
+  POST   /api/backup-schedules
+  PATCH  /api/backup-schedules/:id
+  DELETE /api/backup-schedules/:id
+```
+
+#### gRPC (Agent)
+
+```protobuf
+// Added to AgentService
+rpc CreateBackup(BackupRequest) returns (stream BackupEvent);
+rpc RestoreBackup(RestoreRequest) returns (stream RestoreEvent);
+rpc ListVolumes(ContainerRef) returns (VolumeList);
+```
+
+### 4.9 Monitoring & Notifications
 
 - Real-time log streaming (via WebSocket)
 - Container health checks with auto-restart
@@ -186,7 +304,7 @@ apps/api/
 
 | Concern | Library |
 |---------|---------|
-| ORM | Prisma (supports PostgreSQL + SQLite) |
+| ORM | TypeORM (supports PostgreSQL + SQLite, better raw performance than Prisma) |
 | Auth | Passport.js (local, GitHub, Google, OIDC) + JWT |
 | Validation | class-validator + class-transformer |
 | API Docs | Swagger / OpenAPI (auto-generated) |
@@ -256,7 +374,12 @@ apps/web/
           databases/   # Managed databases
           settings/    # Project settings
         servers/       # Server list, add, monitor
-        settings/      # Team, profile, notifications
+        teams/         # Team list, create, switch active team
+        [teamId]/
+          members/     # Member list, invite, role management
+          audit-log/   # Team-level audit log
+          settings/    # Team settings, billing, danger zone
+        settings/      # User profile, notifications, API tokens
     components/
       ui/              # shadcn/ui primitives
       layout/          # Shell, sidebar, header
@@ -351,11 +474,14 @@ Project
 
 Environment
   id, project_id, name (production|staging|preview),
-  auto_deploy, domain_suffix
+  auto_deploy, domain_suffix,
+  replicas (int, default 1), min_replicas, max_replicas,
+  scale_to_zero (bool, default false)
 
 Deployment
   id, environment_id, server_id, status (queued|building|deploying|running|failed|rolled_back),
   commit_sha, commit_message, image_tag, build_logs, deploy_logs,
+  desired_replicas, running_replicas,
   started_at, finished_at, created_at
 
 Server
@@ -373,10 +499,16 @@ Secret
   key, encrypted_value, provider_type, provider_ref,
   version, created_by, created_at, updated_at
 
+SecretAcl
+  id, secret_id (nullable -- null means scope-wide default),
+  scope (global|project|environment), scope_id,
+  grantee_type (user|role|api_token), grantee_id,
+  permissions (bitmask or JSON: read|write|use|manage),
+  created_by, created_at
+
 ManagedDatabase
   id, server_id, team_id, name, engine (postgres|mysql|mongo|redis|clickhouse|minio),
   version, port, credentials_secret_id,
-  backup_enabled, backup_schedule, backup_s3_bucket,
   status, created_at
 
 SshKey
@@ -410,6 +542,10 @@ service AgentService {
   rpc RemoveContainer(ContainerRef) returns (Empty);
   rpc RollbackContainer(RollbackRequest) returns (DeployResponse);
 
+  // Scaling
+  rpc ScaleService(ScaleRequest) returns (ScaleResponse);
+  rpc GetReplicaStatus(ContainerRef) returns (ReplicaStatus);
+
   // Logs
   rpc StreamLogs(ContainerRef) returns (stream LogEntry);
 
@@ -425,6 +561,31 @@ service AgentService {
   // Secrets
   rpc InjectSecrets(SecretInjection) returns (Empty);
 }
+
+message ScaleRequest {
+  string service_id = 1;
+  uint32 desired_replicas = 2;
+}
+
+message ScaleResponse {
+  string service_id = 1;
+  uint32 running_replicas = 2;
+  uint32 desired_replicas = 3;
+}
+
+message ReplicaStatus {
+  string service_id = 1;
+  uint32 running = 2;
+  uint32 desired = 3;
+  repeated ReplicaInfo replicas = 4;
+}
+
+message ReplicaInfo {
+  string container_id = 1;
+  string status = 2;
+  string health = 3;
+  uint64 started_at = 4;
+}
 ```
 
 ---
@@ -439,7 +600,7 @@ vesta/
     agent/              # Rust system agent
   packages/
     shared/             # Shared TypeScript types, constants, enums
-    db/                 # Prisma schema + migrations
+    db/                 # TypeORM entities, migrations, data source config
     config/             # Shared config (eslint, tsconfig bases)
   proto/                # Protobuf definitions (shared between API + Agent)
   docker/
@@ -514,7 +675,8 @@ Additional target servers are added from the dashboard. Vesta SSHs into the targ
 ### Access Control
 - **RBAC** enforced at the API layer via NestJS guards
 - Four roles: Owner > Admin > Developer > Viewer
-- API tokens scoped to specific operations
+- **Fine-grained secret ACLs**: per-secret or per-scope access control with `read`, `write`, `use`, and `manage` permissions, independent of RBAC role
+- API tokens scoped to specific operations and optionally to specific secrets/prefixes
 - Optional **2FA/TOTP** for dashboard login
 
 ### Operational Security
@@ -576,6 +738,11 @@ Deployments
   POST   /api/deployments/:id/rollback
   POST   /api/deployments/:id/cancel
 
+Scaling
+  GET    /api/environments/:envId/scale
+  PATCH  /api/environments/:envId/scale          { replicas: number }
+  GET    /api/environments/:envId/replicas
+
 Servers
   GET    /api/teams/:teamId/servers
   POST   /api/teams/:teamId/servers
@@ -590,6 +757,12 @@ Secrets
   PATCH  /api/secrets/:id
   DELETE /api/secrets/:id
   POST   /api/secrets/:id/rotate
+
+Secret Permissions
+  GET    /api/secrets/:id/acl
+  PUT    /api/secrets/:id/acl                    { granteeType, granteeId, permissions[] }
+  DELETE /api/secrets/:id/acl/:aclId
+  GET    /api/secrets/acl?scope=...&scopeId=...  (scope-wide defaults)
 
 Domains
   GET    /api/projects/:projectId/domains
@@ -640,7 +813,7 @@ Server -> Client:
 
 - Monorepo setup (Turborepo + pnpm + Cargo workspace)
 - NestJS API scaffolding with auth module (email/password + JWT)
-- Prisma schema + PostgreSQL setup + initial migration
+- TypeORM entities + PostgreSQL setup + initial migration
 - Rust agent with gRPC skeleton + Docker connectivity via bollard
 - Protobuf definitions for agent communication
 - Next.js dashboard shell with login/register flow
@@ -656,17 +829,22 @@ Server -> Client:
 - Real-time build/deploy log streaming (Agent -> API -> WebSocket -> Frontend)
 - Project and environment CRUD in dashboard
 
-### Phase 3 -- Secrets & Databases (Weeks 9-11)
+### Phase 3 -- Secrets, Databases & Backups (Weeks 9-12)
 
 - Built-in encrypted secret store (AES-256-GCM + Argon2id)
 - SecretProvider interface + HashiCorp Vault adapter
 - AWS Secrets Manager adapter
 - Secret injection into containers at deploy time
+- Fine-grained secret ACL enforcement
 - Secrets management UI in dashboard
 - One-click database provisioning (PostgreSQL, MySQL, Redis, MongoDB)
-- Database backup scheduling to S3
+- Storage destination configuration (S3-compatible)
+- Database backup scheduling, retention policies, and encrypted upload
+- Application volume backup (opt-in)
+- One-click restore from backup in dashboard
+- Backup monitoring and failure notifications
 
-### Phase 4 -- Multi-Server & Polish (Weeks 12-15)
+### Phase 4 -- Multi-Server & Polish (Weeks 13-16)
 
 - Multi-server registration and agent auto-install via SSH
 - Server monitoring dashboards (CPU, RAM, disk, network)
