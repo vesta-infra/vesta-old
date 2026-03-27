@@ -1,0 +1,43 @@
+# ─── Vesta Agent (Rust / gRPC) — musl-linked release binary ────────────────────
+# Build from repository root:
+#   docker build -f docker/Dockerfile.agent -t vesta-agent .
+#
+# On Alpine, `cargo build --release` targets `*-unknown-linux-musl` for the build
+# architecture (same as an explicit `x86_64-unknown-linux-musl` build on linux/amd64).
+# To force an amd64 image from Apple Silicon, use:
+#   docker buildx build --platform linux/amd64 -f docker/Dockerfile.agent -t vesta-agent .
+
+# ─── Stage 1: builder — compile tonic + prost (requires protoc) ──────────────
+# Toolchain must satisfy transitive crates (edition 2024, `serde_with` MSRV, etc.); bump when Cargo.lock changes.
+FROM rust:1.88-alpine AS builder
+
+RUN apk add --no-cache \
+  musl-dev \
+  openssl-dev \
+  openssl-libs-static \
+  pkgconf \
+  protobuf-dev \
+  protobuf \
+  gcc \
+  make
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY apps/agent ./apps/agent
+COPY proto ./proto
+
+RUN cargo build --release --package vesta-agent
+
+# ─── Stage 2: runner — tiny image with the binary only ─────────────────────────
+FROM alpine:3.20 AS runner
+
+RUN apk add --no-cache ca-certificates libgcc
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/vesta-agent ./vesta-agent
+
+EXPOSE 50051
+
+ENTRYPOINT ["./vesta-agent"]

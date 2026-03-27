@@ -1,0 +1,140 @@
+# Full production-style stack: PostgreSQL, Redis, Nest API, Next.js, Rust agent, and Caddy (TLS).
+#
+# Prerequisites:
+#   - Copy `.env.example` to `.env` at the repo root and set secrets (JWT_SECRET, ENCRYPTION_MASTER_KEY, etc.).
+#   - For public HTTPS, set CADDY_DOMAIN to your hostname and remove `tls internal` from `docker/Caddyfile`
+#     so Caddy can obtain Let’s Encrypt certificates (ports 80/443 must be reachable).
+#
+# From this directory:
+#   docker compose -f docker-compose.prod.yml --env-file ../.env up --build
+
+services:
+  # ─── PostgreSQL — primary application database ─────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: vesta-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vesta
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vesta}
+      POSTGRES_DB: vesta
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vesta"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis — BullMQ / caching ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: vesta-redis-prod
+    restart: unless-stopped
+    volumes:
+      - redis_data_prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── API — NestJS (see apps/api) ───────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: vesta-api-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_PORT: "3001"
+      DATABASE_URL: postgres://vesta:${POSTGRES_PASSWORD:-vesta}@postgres:5432/vesta
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-15m}
+      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-7d}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?set ENCRYPTION_MASTER_KEY in .env}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://${CADDY_DOMAIN:-localhost}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--spider",
+          "http://127.0.0.1:3001/api/health",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─── Web — Next.js standalone (see apps/web) ───────────────────────────────
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+      args:
+        # Origin only — `src/lib/api.ts` already prefixes paths with `/api/...`
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://${CADDY_DOMAIN:-localhost}}
+    container_name: vesta-web-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─── Agent — Rust gRPC + Docker socket (host engine access) ────────────────
+  agent:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.agent
+    container_name: vesta-agent-prod
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # gRPC (plain TCP until mTLS is wired in the agent)
+    ports:
+      - "50051:50051"
+
+  # ─── Caddy — reverse proxy + automatic HTTPS ───────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: vesta-caddy-prod
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+
+volumes:
+  postgres_data_prod:
+  redis_data_prod:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,27 @@
+{
+  "name": "@vesta/db",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "migration:generate": "typeorm migration:generate -d ./dist/data-source.js",
+    "migration:run": "typeorm migration:run -d ./dist/data-source.js",
+    "migration:revert": "typeorm migration:revert -d ./dist/data-source.js"
+  },
+  "dependencies": {
+    "typeorm": "^0.3.20",
+    "pg": "^8.13.0",
+    "reflect-metadata": "^0.2.2"
+  },
+  "devDependencies": {
+    "@vesta/config": "workspace:*",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  },
+  "peerDependencies": {
+    "@vesta/shared": "workspace:*"
+  }
+}

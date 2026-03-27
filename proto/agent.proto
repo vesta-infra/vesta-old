@@ -1,0 +1,357 @@
+syntax = "proto3";
+
+package vesta.agent;
+
+// -----------------------------------------------------------------------------
+// Agent gRPC API — NestJS API ↔ Rust agent (mTLS)
+// -----------------------------------------------------------------------------
+
+service AgentService {
+  // Deployment
+  rpc BuildImage(BuildRequest) returns (stream BuildEvent);
+  rpc DeployContainer(DeployRequest) returns (DeployResponse);
+  rpc StopContainer(ContainerRef) returns (Empty);
+  rpc RemoveContainer(ContainerRef) returns (Empty);
+  rpc RollbackContainer(RollbackRequest) returns (DeployResponse);
+
+  // Scaling
+  rpc ScaleService(ScaleRequest) returns (ScaleResponse);
+  rpc GetReplicaStatus(ContainerRef) returns (ReplicaStatus);
+
+  // Logs
+  rpc StreamLogs(ContainerRef) returns (stream LogLine);
+
+  // Proxy
+  rpc ConfigureRoute(RouteConfig) returns (Empty);
+  rpc RemoveRoute(RouteRef) returns (Empty);
+
+  // Health & Metrics
+  rpc GetSystemMetrics(Empty) returns (SystemMetrics);
+  rpc Heartbeat(Empty) returns (HeartbeatResponse);
+  rpc GetContainerStatus(ContainerRef) returns (ContainerStatus);
+
+  // Secrets
+  rpc InjectSecrets(SecretInjection) returns (Empty);
+
+  // Cron Jobs
+  rpc RunCronJob(CronJobRequest) returns (stream CronJobEvent);
+
+  // Container Shell
+  rpc ExecInContainer(stream ExecInput) returns (stream ExecOutput);
+
+  // Maintenance
+  rpc SetMaintenanceMode(MaintenanceConfig) returns (Empty);
+
+  // Log Query
+  rpc QueryLogs(LogQuery) returns (stream LogLine);
+
+  // Resource Limits
+  rpc UpdateResourceLimits(ResourceLimitConfig) returns (Empty);
+
+  // Backups
+  rpc CreateBackup(BackupRequest) returns (stream BackupEvent);
+  rpc RestoreBackup(RestoreRequest) returns (stream RestoreEvent);
+  rpc ListVolumes(ContainerRef) returns (VolumeList);
+}
+
+// -----------------------------------------------------------------------------
+// Common
+// -----------------------------------------------------------------------------
+
+message Empty {}
+
+// -----------------------------------------------------------------------------
+// Deployment
+// -----------------------------------------------------------------------------
+
+message BuildRequest {
+  string git_url = 1;
+  string branch = 2;
+  string commit_sha = 3;
+  string build_method = 4;
+  string dockerfile_path = 5;
+  map<string, string> build_args = 6;
+  string image_tag = 7;
+}
+
+message BuildEvent {
+  string line = 1;
+  string stream = 2; // "stdout" | "stderr"
+  int64 timestamp = 3;
+  bool done = 4;
+  string error = 5;
+}
+
+message HealthCheck {
+  string command = 1;
+  uint32 interval_seconds = 2;
+  uint32 timeout_seconds = 3;
+  uint32 retries = 4;
+  uint32 start_period_seconds = 5;
+}
+
+message ResourceLimitConfig {
+  uint32 cpu_limit_millicores = 1;
+  uint32 memory_limit_mb = 2;
+}
+
+message DeployRequest {
+  string image_tag = 1;
+  string container_name = 2;
+  map<string, string> env_vars = 3;
+  map<string, string> ports = 4;
+  repeated string volumes = 5;
+  string network = 6;
+  HealthCheck health_check = 7;
+  ResourceLimitConfig resource_limits = 8;
+  uint32 replicas = 9;
+  map<string, string> labels = 10;
+}
+
+message DeployResponse {
+  string container_id = 1;
+  string status = 2;
+}
+
+message ContainerRef {
+  string container_id = 1;
+  string service_id = 2;
+}
+
+message RollbackRequest {
+  string service_id = 1;
+  string target_image_tag = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Scaling
+// -----------------------------------------------------------------------------
+
+message ScaleRequest {
+  string service_id = 1;
+  uint32 desired_replicas = 2;
+}
+
+message ScaleResponse {
+  string service_id = 1;
+  uint32 running_replicas = 2;
+  uint32 desired_replicas = 3;
+}
+
+message ReplicaInfo {
+  string container_id = 1;
+  string status = 2;
+  string health = 3;
+  uint64 started_at = 4;
+}
+
+message ReplicaStatus {
+  string service_id = 1;
+  uint32 running = 2;
+  uint32 desired = 3;
+  repeated ReplicaInfo replicas = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Logs
+// -----------------------------------------------------------------------------
+
+message LogLine {
+  string line = 1;
+  string stream = 2;
+  int64 timestamp = 3;
+  string container_id = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Proxy
+// -----------------------------------------------------------------------------
+
+message RouteConfig {
+  string domain = 1;
+  repeated string upstream_targets = 2;
+  bool force_https = 3;
+  bool redirect_www = 4;
+}
+
+message RouteRef {
+  string domain = 1;
+}
+
+// -----------------------------------------------------------------------------
+// Health & Metrics
+// -----------------------------------------------------------------------------
+
+message SystemMetrics {
+  double cpu_usage_percent = 1;
+  uint64 memory_used_mb = 2;
+  uint64 memory_total_mb = 3;
+  uint64 disk_used_gb = 4;
+  uint64 disk_total_gb = 5;
+  uint64 network_in_bytes = 6;
+  uint64 network_out_bytes = 7;
+  int64 timestamp = 8;
+}
+
+message HeartbeatResponse {
+  string agent_version = 1;
+  uint64 uptime_seconds = 2;
+  string docker_version = 3;
+}
+
+message ContainerStatus {
+  string container_id = 1;
+  string status = 2;
+  string health = 3;
+  string image = 4;
+  int64 started_at = 5;
+  double cpu_percent = 6;
+  uint64 memory_usage_mb = 7;
+}
+
+// -----------------------------------------------------------------------------
+// Secrets
+// -----------------------------------------------------------------------------
+
+message SecretInjection {
+  string container_id = 1;
+  map<string, string> secrets = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Cron Jobs
+// -----------------------------------------------------------------------------
+
+message CronJobRequest {
+  string job_id = 1;
+  string image_tag = 2;
+  string command = 3;
+  map<string, string> env_vars = 4;
+  uint32 timeout_seconds = 5;
+  ResourceLimitConfig resource_limits = 6;
+}
+
+message CronJobEvent {
+  string job_id = 1;
+  string line = 2;
+  string stream = 3;
+  int64 timestamp = 4;
+  int32 exit_code = 5;
+  bool done = 6;
+  string error = 7;
+}
+
+// -----------------------------------------------------------------------------
+// Container Shell
+// -----------------------------------------------------------------------------
+
+message TerminalResize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ExecInput {
+  string session_id = 1;
+  bytes data = 2;
+  optional TerminalResize resize = 3;
+}
+
+message ExecOutput {
+  string session_id = 1;
+  bytes data = 2;
+  int32 exit_code = 3;
+  bool done = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Maintenance
+// -----------------------------------------------------------------------------
+
+message MaintenanceConfig {
+  string domain = 1;
+  bool enabled = 2;
+  string custom_html = 3;
+  uint32 status_code = 4;
+  repeated string allowed_ips = 5;
+  string bypass_token = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Log Query
+// -----------------------------------------------------------------------------
+
+message LogQuery {
+  string container_id = 1;
+  string service_id = 2;
+  string query = 3;
+  int64 from_timestamp = 4;
+  int64 to_timestamp = 5;
+  string level = 6;
+  uint32 limit = 7;
+}
+
+// -----------------------------------------------------------------------------
+// Backups
+// -----------------------------------------------------------------------------
+
+message StorageConfig {
+  string type = 1;
+  string bucket = 2;
+  string region = 3;
+  string endpoint = 4;
+  string access_key = 5;
+  string secret_key = 6;
+  string path = 7;
+}
+
+message BackupRequest {
+  string backup_id = 1;
+  string resource_type = 2;
+  string resource_id = 3;
+  string container_id = 4;
+  string engine = 5;
+  string connection_url = 6;
+  StorageConfig storage_config = 7;
+}
+
+message BackupEvent {
+  string backup_id = 1;
+  string line = 2;
+  uint32 progress_percent = 3;
+  bool done = 4;
+  string error = 5;
+  uint64 size_bytes = 6;
+}
+
+message RestoreRequest {
+  string backup_id = 1;
+  string resource_type = 2;
+  string resource_id = 3;
+  string container_id = 4;
+  string engine = 5;
+  string connection_url = 6;
+  StorageConfig storage_config = 7;
+  string backup_path = 8;
+}
+
+message RestoreEvent {
+  string backup_id = 1;
+  string line = 2;
+  uint32 progress_percent = 3;
+  bool done = 4;
+  string error = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Volumes
+// -----------------------------------------------------------------------------
+
+message VolumeInfo {
+  string name = 1;
+  string mount_point = 2;
+  uint64 size_bytes = 3;
+}
+
+message VolumeList {
+  repeated VolumeInfo volumes = 1;
+}

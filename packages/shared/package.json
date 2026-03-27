@@ -1,0 +1,15 @@
+{
+  "name": "@vesta/shared",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "@vesta/config": "workspace:*",
+    "typescript": "^5.7.0"
+  }
+}

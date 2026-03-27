@@ -1,0 +1,26 @@
+# Caddy reverse proxy for the production compose stack (`docker-compose.prod.yml`).
+#
+# Environment:
+#   CADDY_DOMAIN — hostname Caddy listens on (passed from compose; default `localhost`).
+#
+# TLS:
+#   - Default `tls internal` is for local HTTPS (browser will warn unless you trust the cert).
+#   - For a real public domain, remove the `tls internal` line and point DNS to this host so
+#     Caddy can issue Let’s Encrypt certificates automatically.
+
+{$CADDY_DOMAIN:localhost} {
+	encode gzip zstd
+
+	# NestJS global prefix is `/api` — forward as-is to the API container
+	handle /api/* {
+		reverse_proxy api:3001
+	}
+
+	# Next.js App Router and static assets
+	handle {
+		reverse_proxy web:3000
+	}
+
+	# Local / self-signed TLS. Omit for public automatic HTTPS (Let’s Encrypt).
+	tls internal
+}
